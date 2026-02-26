@@ -1,0 +1,138 @@
+name: Claude Dev Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task description from Discord"
+        required: true
+        type: string
+      task_type:
+        description: "Type of task (feature, bugfix, refactor)"
+        required: false
+        default: "feature"
+        type: string
+      discord_user:
+        description: "Discord username who requested the task"
+        required: false
+        default: "unknown"
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  claude-dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Generate branch name
+        id: branch
+        run: |
+          SLUG=$(echo "${{ github.event.inputs.task }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 40)
+          TIMESTAMP=$(date +%s)
+          BRANCH="claude/${{ github.event.inputs.task_type }}/${SLUG}-${TIMESTAMP}"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Create branch
+        run: |
+          git checkout -b "${{ steps.branch.outputs.name }}"
+
+      - name: Run Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "You are working on the discord-product-robot project. A team member requested the following (${{ github.event.inputs.task_type }}):
+
+          ${{ github.event.inputs.task }}
+
+          Implement this change. Follow existing code patterns (ESM imports, process.env for config). Keep changes minimal and focused." --dangerously-skip-permissions
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "claude-dev-bot"
+          git config user.email "claude-dev-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "${{ github.event.inputs.task_type }}: ${{ github.event.inputs.task }}
+
+          Requested by ${{ github.event.inputs.discord_user }} via Discord /dev command.
+
+          Co-Authored-By: Claude <noreply@anthropic.com>"
+          git push origin "${{ steps.branch.outputs.name }}"
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.has_changes == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_URL=$(gh pr create \
+            --title "${{ github.event.inputs.task_type }}: ${{ github.event.inputs.task }}" \
+            --body "## Summary
+          Requested by **${{ github.event.inputs.discord_user }}** via Discord \`/dev\` command.
+
+          **Type:** ${{ github.event.inputs.task_type }}
+          **Task:** ${{ github.event.inputs.task }}
+
+          ---
+          *Implemented by Claude Code Dev Agent*" \
+            --base main \
+            --head "${{ steps.branch.outputs.name }}")
+          echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Post success to Discord
+        if: steps.changes.outputs.has_changes == 'true' && success()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -H "Content-Type: application/json" -d "{
+            \"content\": \"✅ **Dev Agent finished!**\nRequested by: **${{ github.event.inputs.discord_user }}**\nTask: ${{ github.event.inputs.task }}\nPR: ${{ steps.pr.outputs.url }}\"
+          }" "$DISCORD_WEBHOOK_URL"
+
+      - name: Post no-changes to Discord
+        if: steps.changes.outputs.has_changes == 'false'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -H "Content-Type: application/json" -d "{
+            \"content\": \"⚠️ **Dev Agent finished — no changes made.**\nRequested by: **${{ github.event.inputs.discord_user }}**\nTask: ${{ github.event.inputs.task }}\nClaude reviewed the codebase but didn't produce any file changes.\"
+          }" "$DISCORD_WEBHOOK_URL"
+
+      - name: Post failure to Discord
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -H "Content-Type: application/json" -d "{
+            \"content\": \"❌ **Dev Agent failed.**\nRequested by: **${{ github.event.inputs.discord_user }}**\nTask: ${{ github.event.inputs.task }}\nLogs: ${RUN_URL}\"
+          }" "$DISCORD_WEBHOOK_URL"

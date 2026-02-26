@@ -77,6 +77,26 @@ const commands = [
         .setName("force")
         .setDescription("Regenerate even if a tasting card already exists")
         .setRequired(false)
+    ),
+  new SlashCommandBuilder()
+    .setName("dev")
+    .setDescription("Ask Claude to implement a feature, fix a bug, or refactor code")
+    .addStringOption(option =>
+      option
+        .setName("task")
+        .setDescription("Describe what you want done (10-500 chars)")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("type")
+        .setDescription("Type of task")
+        .setRequired(false)
+        .addChoices(
+          { name: "Feature", value: "feature" },
+          { name: "Bugfix", value: "bugfix" },
+          { name: "Refactor", value: "refactor" }
+        )
     )
 ].map(command => command.toJSON());
 

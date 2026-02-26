@@ -1,6 +1,7 @@
 import { Client, GatewayIntentBits, AttachmentBuilder } from "discord.js";
 import { runPipeline } from "./pipeline.js";
 import { generateTastingCard } from "./tasting-card.js";
+import { handleDevCommand } from "./dev-command.js";
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
@@ -78,6 +79,11 @@ client.on("interactionCreate", async interaction => {
         content: `❌ Error: ${err.message || String(err)}`
       });
     }
+    return;
+  }
+
+  if (interaction.commandName === "dev") {
+    await handleDevCommand(interaction);
     return;
   }
 
