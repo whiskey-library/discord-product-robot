@@ -208,13 +208,20 @@ export async function runPipeline({ image, cost, price, abv, proof, quantity, ba
     // -------------------------
     let needsVendor = false;
     let unmatchedVendor = "";
+    let vendorCorrected = false; // true when we auto-corrected to a close match
+    let vendorOriginal = "";     // the AI's original vendor before correction
     try {
       if (aiData.vendor) {
         const candidates = await searchVendors(aiData.vendor);
-        const matched = matchVendor(aiData.vendor, candidates);
-        if (matched) {
-          console.log("VENDOR: Matched AI vendor to Shopify:", matched);
-          aiData.vendor = matched;
+        const match = matchVendor(aiData.vendor, candidates);
+        if (match?.matchType === "exact") {
+          console.log("VENDOR: Exact match to Shopify:", match.vendor);
+          aiData.vendor = match.vendor;
+        } else if (match?.matchType === "close") {
+          console.log("VENDOR: Close match — AI:", aiData.vendor, "→ Shopify:", match.vendor);
+          vendorOriginal = aiData.vendor;
+          aiData.vendor = match.vendor;
+          vendorCorrected = true;
         } else {
           console.warn("VENDOR: No match for AI vendor:", aiData.vendor, "candidates:", candidates);
           needsVendor = true;
@@ -292,6 +299,9 @@ export async function runPipeline({ image, cost, price, abv, proof, quantity, ba
     if (needsAbv) {
       await sendSafe("⚠️ ABV/proof wasn't found on the label with confidence, so I left **Alcohol by Volume** blank. Please fill it in manually or re-run with the **abv**/**proof** command options.");
     }
+    if (vendorCorrected) {
+      await sendSafe(`ℹ️ Vendor auto-corrected: AI said **"${vendorOriginal}"** but closest existing Shopify vendor is **"${aiData.vendor}"** — used the existing one. Please verify this is correct.`);
+    }
     if (needsVendor) {
       await sendSafe(`⚠️ The vendor **"${unmatchedVendor}"** was NOT found in the existing Shopify vendors. The product was created with this vendor, but please verify it is correct and not a duplicate.`);
     }
@@ -303,7 +313,7 @@ export async function runPipeline({ image, cost, price, abv, proof, quantity, ba
 
     console.log("PIPELINE SUCCESS:", adminUrl);
 
-    return { ok: true, adminUrl, needsAbv, needsVendor, unmatchedVendor, productId: product.id, productTitle };
+    return { ok: true, adminUrl, needsAbv, needsVendor, unmatchedVendor, vendorCorrected, vendorOriginal, productId: product.id, productTitle };
   } catch (err) {
     console.error("PIPELINE ERROR:", err);
     await sendSafe(`❌ Pipeline failed: ${err?.message || String(err)}`);

@@ -336,13 +336,9 @@ export async function setProductMetafield(productId, namespace, key, value, type
 }
 
 /**
- * Search for existing Shopify vendors matching a query string.
- * Uses the products search with vendor: filter and deduplicates results.
- * Returns an array of unique vendor strings found in the store.
+ * Run a single vendor search query against Shopify and return unique vendor strings.
  */
-export async function searchVendors(vendorQuery) {
-  if (!vendorQuery || !String(vendorQuery).trim()) return [];
-
+async function _vendorQuery(searchQuery) {
   const query = `
     query SearchVendors($searchQuery: String!) {
       products(first: 20, query: $searchQuery) {
@@ -365,7 +361,7 @@ export async function searchVendors(vendorQuery) {
       },
       body: JSON.stringify({
         query,
-        variables: { searchQuery: `vendor:"${String(vendorQuery).trim()}"` }
+        variables: { searchQuery }
       })
     }
   );
@@ -373,7 +369,7 @@ export async function searchVendors(vendorQuery) {
   const data = await res.json();
 
   if (data.errors) {
-    console.error("SHOPIFY: searchVendors GraphQL errors:", data.errors);
+    console.error("SHOPIFY: _vendorQuery GraphQL errors:", data.errors);
     throw new Error(`Vendor search failed: ${data.errors[0]?.message}`);
   }
 
@@ -383,15 +379,50 @@ export async function searchVendors(vendorQuery) {
     const v = String(edge.node?.vendor || "").trim();
     if (v) vendors.add(v);
   }
-
-  console.log("SHOPIFY: searchVendors found:", [...vendors]);
   return [...vendors];
 }
 
 /**
+ * Search for existing Shopify vendors matching a query string.
+ * 1. Tries exact match first (vendor:"Ancient Ancient Age")
+ * 2. If no results, does broader word-based searches (vendor:Ancient, vendor:Age)
+ *    to find close matches like "Ancient Age"
+ * Returns an array of unique vendor strings found in the store.
+ */
+export async function searchVendors(vendorQuery) {
+  if (!vendorQuery || !String(vendorQuery).trim()) return [];
+
+  const trimmed = String(vendorQuery).trim();
+
+  // Step 1: Exact match
+  const exact = await _vendorQuery(`vendor:"${trimmed}"`);
+  if (exact.length > 0) {
+    console.log("SHOPIFY: searchVendors exact match found:", exact);
+    return exact;
+  }
+
+  // Step 2: Broader word-based search — find vendors containing any of the words
+  const words = [...new Set(trimmed.toLowerCase().split(/\s+/).filter(w => w.length >= 3))];
+  if (words.length === 0) {
+    console.log("SHOPIFY: searchVendors no usable words for broad search");
+    return [];
+  }
+
+  const allVendors = new Set();
+  for (const word of words) {
+    const found = await _vendorQuery(`vendor:${word}`);
+    for (const v of found) allVendors.add(v);
+  }
+
+  console.log("SHOPIFY: searchVendors broad search found:", [...allVendors]);
+  return [...allVendors];
+}
+
+/**
  * Match an AI-generated vendor string against a list of existing Shopify vendors.
- * Case-insensitive comparison. Returns the Shopify-canonical vendor string if matched,
- * or null if no match.
+ * Returns { vendor, matchType } or null.
+ *   matchType: "exact"  — case-insensitive exact match
+ *              "close"  — one name contains the other, or high word overlap
  */
 export function matchVendor(aiVendor, candidateVendors) {
   if (!aiVendor || !Array.isArray(candidateVendors) || candidateVendors.length === 0) {
@@ -399,10 +430,45 @@ export function matchVendor(aiVendor, candidateVendors) {
   }
 
   const normalized = String(aiVendor).trim().toLowerCase();
+  const aiWords = normalized.split(/\s+/);
+
+  // Pass 1: Exact case-insensitive match
   for (const candidate of candidateVendors) {
     if (String(candidate).trim().toLowerCase() === normalized) {
-      return candidate; // Return the Shopify-canonical casing
+      return { vendor: candidate, matchType: "exact" };
     }
+  }
+
+  // Pass 2: Containment — one vendor name contains the other entirely
+  // e.g., AI says "Ancient Ancient Age" but DB has "Ancient Age"
+  let bestClose = null;
+  let bestOverlap = 0;
+
+  for (const candidate of candidateVendors) {
+    const candNorm = String(candidate).trim().toLowerCase();
+    const candWords = candNorm.split(/\s+/);
+
+    // Check containment (either direction)
+    if (normalized.includes(candNorm) || candNorm.includes(normalized)) {
+      // Prefer the longer overlap (more specific match)
+      if (candNorm.length > bestOverlap) {
+        bestClose = candidate;
+        bestOverlap = candNorm.length;
+      }
+      continue;
+    }
+
+    // Check word overlap — e.g., "Buffalo Trace Distillery" vs "Buffalo Trace"
+    const shared = aiWords.filter(w => candWords.includes(w)).length;
+    const overlapRatio = shared / Math.max(aiWords.length, candWords.length);
+    if (overlapRatio >= 0.5 && shared >= 1 && shared > bestOverlap) {
+      bestClose = candidate;
+      bestOverlap = shared;
+    }
+  }
+
+  if (bestClose) {
+    return { vendor: bestClose, matchType: "close" };
   }
 
   return null;
