@@ -149,8 +149,7 @@ jobs:
 
           ISSUE_URL=$(gh issue create \
             --title "${TASK_TYPE}: ${TASK}" \
-            --body-file /tmp/issue_body.md \
-            --label "dev-agent")
+            --body-file /tmp/issue_body.md)
           ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
           echo "url=${ISSUE_URL}" >> "$GITHUB_OUTPUT"
           echo "number=${ISSUE_NUM}" >> "$GITHUB_OUTPUT"
