@@ -17,33 +17,10 @@ export async function getProductById(productId) {
     ? productId
     : `gid://shopify/Product/${productId}`;
 
-  // Filter metafields by explicit keys so pagination only counts our fields,
-  // not every metafield on the product (apps, theme, SEO, etc. can push the
-  // count well past the `first` limit and silently drop our custom fields).
-  const METAFIELD_KEYS = [
-    "custom.nose",
-    "custom.palate",
-    "custom.finish",
-    "custom.sub_type",
-    "custom.location_",
-    "custom.state",
-    "custom.cask_wood",
-    "custom.finish_type",
-    "custom.age_statement",
-    "custom.alcohol_by_volume",
-    "custom.awards",
-    "custom.finished",
-    "custom.gift_pack",
-    "custom.store_pick",
-    "custom.cask_strength",
-    "custom.single_barrel",
-    "custom.limited_boolean",
-    "custom.tasting_card",
-    "custom.tasting_card_hash"
-  ];
-
+  // Filter by namespace:"custom" so pagination only counts our metafields,
+  // not app/theme/SEO metafields that could push ours past the `first` limit.
   const query = `
-    query GetProduct($id: ID!, $keys: [String!]) {
+    query GetProduct($id: ID!) {
       product(id: $id) {
         id
         title
@@ -59,7 +36,7 @@ export async function getProductById(productId) {
             }
           }
         }
-        metafields(keys: $keys, first: ${METAFIELD_KEYS.length}) {
+        metafields(namespace: "custom", first: 50) {
           edges {
             node {
               namespace
@@ -80,7 +57,7 @@ export async function getProductById(productId) {
         "X-Shopify-Access-Token": TOKEN,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ query, variables: { id: gid, keys: METAFIELD_KEYS } })
+      body: JSON.stringify({ query, variables: { id: gid } })
     }
   );
 
@@ -103,6 +80,9 @@ export async function getProductById(productId) {
     const fullKey = `${node.namespace}.${node.key}`;
     metafields[fullKey] = node.value;
   }
+
+  const mfKeys = Object.keys(metafields);
+  console.log(`SHOPIFY: Fetched ${mfKeys.length} metafields:`, mfKeys.join(", "));
 
   return {
     id: product.id,
