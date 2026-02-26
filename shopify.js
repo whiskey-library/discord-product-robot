@@ -365,7 +365,7 @@ export async function searchVendors(vendorQuery) {
       },
       body: JSON.stringify({
         query,
-        variables: { searchQuery: `vendor:${String(vendorQuery).trim()}` }
+        variables: { searchQuery: `vendor:"${String(vendorQuery).trim()}"` }
       })
     }
   );
