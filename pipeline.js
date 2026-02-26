@@ -1,6 +1,6 @@
 import { generateProductData } from "./ai.js";
 import { generateStudioImage } from "./image.js";
-import { createDraftProduct } from "./shopify.js";
+import { createDraftProduct, searchVendors, matchVendor } from "./shopify.js";
 import { searchWhiskeyInfo, searchTastingNotes } from "./search.js";
 import { extractLabelSignals, identifyBottleForSearch } from "./ai.js";
 import { buildTastingPriors } from "./tasting-priors.js";
@@ -203,6 +203,32 @@ export async function runPipeline({ image, cost, price, abv, proof, quantity, ba
       aiData.abv = "";
     }
 
+    // -------------------------
+    // VENDOR VALIDATION
+    // -------------------------
+    let needsVendor = false;
+    let unmatchedVendor = "";
+    try {
+      if (aiData.vendor) {
+        const candidates = await searchVendors(aiData.vendor);
+        const matched = matchVendor(aiData.vendor, candidates);
+        if (matched) {
+          console.log("VENDOR: Matched AI vendor to Shopify:", matched);
+          aiData.vendor = matched;
+        } else {
+          console.warn("VENDOR: No match for AI vendor:", aiData.vendor, "candidates:", candidates);
+          needsVendor = true;
+          unmatchedVendor = aiData.vendor;
+        }
+      } else {
+        // AI returned no vendor at all
+        needsVendor = true;
+        unmatchedVendor = "(empty)";
+      }
+    } catch (vendorErr) {
+      console.warn("VENDOR: search failed, keeping AI vendor as-is:", vendorErr?.message || String(vendorErr));
+    }
+
     // Do NOT append reference/search links to the customer-facing description,
     // and do NOT store them as Shopify product tags (Shopify tags are strict).
 
@@ -264,7 +290,10 @@ export async function runPipeline({ image, cost, price, abv, proof, quantity, ba
     // Avoid duplicate links: the final completion message posts the admin URL.
     await sendSafe("✅ Draft created.");
     if (needsAbv) {
-      await sendSafe("⚠️ ABV/proof wasn’t found on the label with confidence, so I left **Alcohol by Volume** blank. Please fill it in manually or re-run with the **abv**/**proof** command options.");
+      await sendSafe("⚠️ ABV/proof wasn't found on the label with confidence, so I left **Alcohol by Volume** blank. Please fill it in manually or re-run with the **abv**/**proof** command options.");
+    }
+    if (needsVendor) {
+      await sendSafe(`⚠️ The vendor **"${unmatchedVendor}"** was NOT found in the existing Shopify vendors. The product was created with this vendor, but please verify it is correct and not a duplicate.`);
     }
 
     // Trigger tasting card generation concurrently (non-blocking)
@@ -274,7 +303,7 @@ export async function runPipeline({ image, cost, price, abv, proof, quantity, ba
 
     console.log("PIPELINE SUCCESS:", adminUrl);
 
-    return { ok: true, adminUrl, needsAbv, productId: product.id, productTitle };
+    return { ok: true, adminUrl, needsAbv, needsVendor, unmatchedVendor, productId: product.id, productTitle };
   } catch (err) {
     console.error("PIPELINE ERROR:", err);
     await sendSafe(`❌ Pipeline failed: ${err?.message || String(err)}`);

@@ -155,7 +155,8 @@ client.on("interactionCreate", async interaction => {
         `${mention} ✅ Product creation finished.`,
         productTitle ? `**Product:** ${productTitle}` : "",
         result.adminUrl ? `Draft: ${result.adminUrl}` : "",
-        result.needsAbv ? "⚠️ ABV/proof wasn't found with confidence, so **Alcohol by Volume** was left blank." : ""
+        result.needsAbv ? "⚠️ ABV/proof wasn't found with confidence, so **Alcohol by Volume** was left blank." : "",
+        result.needsVendor ? `@everyone ⚠️ Vendor **"${result.unmatchedVendor}"** was not found in Shopify. Please verify the vendor on this product and correct if needed.` : ""
       ].filter(Boolean);
 
       if (logThread) {

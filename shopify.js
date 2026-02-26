@@ -336,6 +336,79 @@ export async function setProductMetafield(productId, namespace, key, value, type
 }
 
 /**
+ * Search for existing Shopify vendors matching a query string.
+ * Uses the products search with vendor: filter and deduplicates results.
+ * Returns an array of unique vendor strings found in the store.
+ */
+export async function searchVendors(vendorQuery) {
+  if (!vendorQuery || !String(vendorQuery).trim()) return [];
+
+  const query = `
+    query SearchVendors($searchQuery: String!) {
+      products(first: 20, query: $searchQuery) {
+        edges {
+          node {
+            vendor
+          }
+        }
+      }
+    }
+  `;
+
+  const res = await fetch(
+    `https://${SHOP}/admin/api/2024-10/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": TOKEN,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        query,
+        variables: { searchQuery: `vendor:${String(vendorQuery).trim()}` }
+      })
+    }
+  );
+
+  const data = await res.json();
+
+  if (data.errors) {
+    console.error("SHOPIFY: searchVendors GraphQL errors:", data.errors);
+    throw new Error(`Vendor search failed: ${data.errors[0]?.message}`);
+  }
+
+  const edges = data.data?.products?.edges || [];
+  const vendors = new Set();
+  for (const edge of edges) {
+    const v = String(edge.node?.vendor || "").trim();
+    if (v) vendors.add(v);
+  }
+
+  console.log("SHOPIFY: searchVendors found:", [...vendors]);
+  return [...vendors];
+}
+
+/**
+ * Match an AI-generated vendor string against a list of existing Shopify vendors.
+ * Case-insensitive comparison. Returns the Shopify-canonical vendor string if matched,
+ * or null if no match.
+ */
+export function matchVendor(aiVendor, candidateVendors) {
+  if (!aiVendor || !Array.isArray(candidateVendors) || candidateVendors.length === 0) {
+    return null;
+  }
+
+  const normalized = String(aiVendor).trim().toLowerCase();
+  for (const candidate of candidateVendors) {
+    if (String(candidate).trim().toLowerCase() === normalized) {
+      return candidate; // Return the Shopify-canonical casing
+    }
+  }
+
+  return null;
+}
+
+/**
  * Create a draft product with metafields
  * Uses a two-step process to ensure metafields are saved:
  * 1. Create product

@@ -689,10 +689,9 @@ REMEMBER: Our customers are collectors who know whiskey. Tell them WHY this bott
     }
   }
 
-  // Ensure vendor is set
+  // If AI didn't return a vendor, leave it empty rather than guessing
   if (!data.vendor) {
-    const titleParts = data.title?.split(" ") || [];
-    data.vendor = titleParts[0] || "Unknown";
+    data.vendor = "";
   }
 
   // Build description if missing
@@ -820,7 +819,6 @@ REMEMBER: Our customers are collectors who know whiskey. Tell them WHY this bott
   }
 
   const requiredFields = [
-    "vendor",
     "title",
     "description",
     "nose",
