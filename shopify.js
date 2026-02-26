@@ -17,33 +17,33 @@ export async function getProductById(productId) {
     ? productId
     : `gid://shopify/Product/${productId}`;
 
-  // Request specific metafields by identifier instead of paginating with
-  // `first: N`.  Products with 30+ metafields (apps, theme, SEO, etc.) could
-  // push our custom fields out of the first page, silently dropping them.
-  const METAFIELD_IDENTIFIERS = [
-    { namespace: "custom", key: "nose" },
-    { namespace: "custom", key: "palate" },
-    { namespace: "custom", key: "finish" },
-    { namespace: "custom", key: "sub_type" },
-    { namespace: "custom", key: "location_" },
-    { namespace: "custom", key: "state" },
-    { namespace: "custom", key: "cask_wood" },
-    { namespace: "custom", key: "finish_type" },
-    { namespace: "custom", key: "age_statement" },
-    { namespace: "custom", key: "alcohol_by_volume" },
-    { namespace: "custom", key: "awards" },
-    { namespace: "custom", key: "finished" },
-    { namespace: "custom", key: "gift_pack" },
-    { namespace: "custom", key: "store_pick" },
-    { namespace: "custom", key: "cask_strength" },
-    { namespace: "custom", key: "single_barrel" },
-    { namespace: "custom", key: "limited_boolean" },
-    { namespace: "custom", key: "tasting_card" },
-    { namespace: "custom", key: "tasting_card_hash" }
+  // Filter metafields by explicit keys so pagination only counts our fields,
+  // not every metafield on the product (apps, theme, SEO, etc. can push the
+  // count well past the `first` limit and silently drop our custom fields).
+  const METAFIELD_KEYS = [
+    "custom.nose",
+    "custom.palate",
+    "custom.finish",
+    "custom.sub_type",
+    "custom.location_",
+    "custom.state",
+    "custom.cask_wood",
+    "custom.finish_type",
+    "custom.age_statement",
+    "custom.alcohol_by_volume",
+    "custom.awards",
+    "custom.finished",
+    "custom.gift_pack",
+    "custom.store_pick",
+    "custom.cask_strength",
+    "custom.single_barrel",
+    "custom.limited_boolean",
+    "custom.tasting_card",
+    "custom.tasting_card_hash"
   ];
 
   const query = `
-    query GetProduct($id: ID!, $identifiers: [HasMetafieldsIdentifier!]!) {
+    query GetProduct($id: ID!, $keys: [String!]) {
       product(id: $id) {
         id
         title
@@ -59,10 +59,14 @@ export async function getProductById(productId) {
             }
           }
         }
-        metafields(identifiers: $identifiers) {
-          namespace
-          key
-          value
+        metafields(keys: $keys, first: ${METAFIELD_KEYS.length}) {
+          edges {
+            node {
+              namespace
+              key
+              value
+            }
+          }
         }
       }
     }
@@ -76,7 +80,7 @@ export async function getProductById(productId) {
         "X-Shopify-Access-Token": TOKEN,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ query, variables: { id: gid, identifiers: METAFIELD_IDENTIFIERS } })
+      body: JSON.stringify({ query, variables: { id: gid, keys: METAFIELD_KEYS } })
     }
   );
 
@@ -92,14 +96,12 @@ export async function getProductById(productId) {
     throw new Error(`Product not found: ${productId}`);
   }
 
-  // Parse metafields into a flat object.
-  // The identifiers query returns a flat array where missing fields are null.
+  // Parse metafields into a flat object
   const metafields = {};
-  for (const mf of product.metafields || []) {
-    if (mf) {
-      const fullKey = `${mf.namespace}.${mf.key}`;
-      metafields[fullKey] = mf.value;
-    }
+  for (const edge of product.metafields?.edges || []) {
+    const node = edge.node;
+    const fullKey = `${node.namespace}.${node.key}`;
+    metafields[fullKey] = node.value;
   }
 
   return {
