@@ -80,7 +80,7 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName("dev")
-    .setDescription("Ask Claude to implement a feature, fix a bug, or refactor code")
+    .setDescription("Ask Claude to plan a feature, fix, or refactor (creates a plan for review)")
     .addStringOption(option =>
       option
         .setName("task")
@@ -97,6 +97,32 @@ const commands = [
           { name: "Bugfix", value: "bugfix" },
           { name: "Refactor", value: "refactor" }
         )
+    ),
+  new SlashCommandBuilder()
+    .setName("dev-revise")
+    .setDescription("Request changes to a dev agent plan")
+    .addIntegerOption(option =>
+      option
+        .setName("issue")
+        .setDescription("GitHub issue number from /dev command")
+        .setMinValue(1)
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("feedback")
+        .setDescription("What changes do you want? (10-500 chars)")
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("dev-approve")
+    .setDescription("Approve a dev agent plan and start implementation")
+    .addIntegerOption(option =>
+      option
+        .setName("issue")
+        .setDescription("GitHub issue number to implement")
+        .setMinValue(1)
+        .setRequired(true)
     )
 ].map(command => command.toJSON());
 

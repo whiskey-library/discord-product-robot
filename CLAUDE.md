@@ -21,7 +21,7 @@ A Discord bot for Whiskey Library (a whiskey store). It automates product creati
 - `image.js` — Image processing
 - `tasting-card.js` — Tasting card generation logic
 - `tasting-card-server.js` — Express server for tasting card HTML
-- `dev-command.js` — `/dev` command handler (triggers Claude dev agent)
+- `dev-command.js` — `/dev`, `/dev-revise`, `/dev-approve` command handlers (two-phase dev agent: plan then implement)
 - `search.js` — Search utilities
 
 ## Conventions

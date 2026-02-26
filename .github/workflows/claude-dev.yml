@@ -3,24 +3,45 @@ name: Claude Dev Agent
 on:
   workflow_dispatch:
     inputs:
-      task:
-        description: "Task description from Discord"
+      phase:
+        description: "Phase: plan, revise, or implement"
         required: true
         type: string
+      task:
+        description: "Task description from Discord (plan phase)"
+        required: false
+        default: ""
+        type: string
       task_type:
-        description: "Type of task (feature, bugfix, refactor)"
+        description: "Type of task: feature, bugfix, refactor (plan phase)"
         required: false
         default: "feature"
+        type: string
+      issue_number:
+        description: "GitHub issue number (revise/implement phase)"
+        required: false
+        default: ""
+        type: string
+      feedback:
+        description: "Revision feedback (revise phase)"
+        required: false
+        default: ""
         type: string
       discord_user:
         description: "Discord username who requested the task"
         required: false
         default: "unknown"
         type: string
+      thread_id:
+        description: "Discord thread ID for posting results"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   claude-dev:
@@ -45,30 +66,279 @@ jobs:
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Generate branch name
-        id: branch
-        run: |
-          SLUG=$(echo "${{ github.event.inputs.task }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 40)
-          TIMESTAMP=$(date +%s)
-          BRANCH="claude/${{ github.event.inputs.task_type }}/${SLUG}-${TIMESTAMP}"
-          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+      # ============================================================
+      # PLAN PHASE
+      # ============================================================
 
-      - name: Create branch
-        run: |
-          git checkout -b "${{ steps.branch.outputs.name }}"
-
-      - name: Run Claude Code
+      - name: "[Plan] Generate plan with Claude"
+        if: inputs.phase == 'plan'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TASK: ${{ inputs.task }}
+          TASK_TYPE: ${{ inputs.task_type }}
         run: |
-          claude -p "You are working on the discord-product-robot project. A team member requested the following (${{ github.event.inputs.task_type }}):
+          claude -p "You are working on the discord-product-robot project.
+          A team member requested the following (${TASK_TYPE}):
 
-          ${{ github.event.inputs.task }}
+          ${TASK}
 
-          Implement this change. Follow existing code patterns (ESM imports, process.env for config). Keep changes minimal and focused." --dangerously-skip-permissions
+          Create a detailed implementation plan. Do NOT implement anything yet.
+          Include:
+          1. Which files need to be modified or created
+          2. What changes are needed in each file
+          3. Any edge cases or considerations
+          4. Testing suggestions
 
-      - name: Check for changes
-        id: changes
+          Output ONLY the plan in markdown format. Be specific and actionable." \
+            --dangerously-skip-permissions > /tmp/plan_output.txt 2>&1 || true
+
+      - name: "[Plan] Validate plan output"
+        if: inputs.phase == 'plan'
+        id: plan_validate
+        run: |
+          PLAN_SIZE=$(wc -c < /tmp/plan_output.txt)
+          if [ "$PLAN_SIZE" -lt 50 ]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "[Plan] Post warning if plan empty"
+        if: inputs.phase == 'plan' && steps.plan_validate.outputs.valid == 'false'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          THREAD_ID: ${{ inputs.thread_id }}
+        run: |
+          WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
+          if [ -n "$THREAD_ID" ]; then
+            WEBHOOK_URL="${WEBHOOK_URL}?thread_id=${THREAD_ID}"
+          fi
+          jq -n --arg content "Claude couldn't produce a plan. Try rephrasing the task." \
+            '{content: $content}' | \
+            curl -H "Content-Type: application/json" -d @- "$WEBHOOK_URL" || true
+
+      - name: "[Plan] Create GitHub Issue"
+        if: inputs.phase == 'plan' && steps.plan_validate.outputs.valid == 'true'
+        id: plan_issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TASK: ${{ inputs.task }}
+          TASK_TYPE: ${{ inputs.task_type }}
+          DISCORD_USER: ${{ inputs.discord_user }}
+          THREAD_ID: ${{ inputs.thread_id }}
+        run: |
+          PLAN_BODY=$(cat /tmp/plan_output.txt)
+
+          cat <<ISSUEEOF > /tmp/issue_body.md
+          <!-- discord_thread_id: ${THREAD_ID} -->
+
+          **Type:** ${TASK_TYPE}
+          **Requested by:** ${DISCORD_USER}
+          **Task:** ${TASK}
+
+          ---
+
+          ## Plan
+
+          ${PLAN_BODY}
+
+          ---
+
+          *Use \`/dev-revise issue:N feedback:"..."\` to request changes, or \`/dev-approve issue:N\` to implement.*
+          ISSUEEOF
+
+          ISSUE_URL=$(gh issue create \
+            --title "${TASK_TYPE}: ${TASK}" \
+            --body-file /tmp/issue_body.md \
+            --label "dev-agent")
+          ISSUE_NUM=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
+          echo "url=${ISSUE_URL}" >> "$GITHUB_OUTPUT"
+          echo "number=${ISSUE_NUM}" >> "$GITHUB_OUTPUT"
+
+      - name: "[Plan] Post plan to Discord thread"
+        if: inputs.phase == 'plan' && steps.plan_validate.outputs.valid == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          THREAD_ID: ${{ inputs.thread_id }}
+          ISSUE_URL: ${{ steps.plan_issue.outputs.url }}
+          ISSUE_NUM: ${{ steps.plan_issue.outputs.number }}
+        run: |
+          # Truncate plan to 1500 chars for Discord
+          PLAN_PREVIEW=$(head -c 1500 /tmp/plan_output.txt)
+          if [ "$(wc -c < /tmp/plan_output.txt)" -gt 1500 ]; then
+            PLAN_PREVIEW="${PLAN_PREVIEW}..."
+          fi
+
+          WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
+          if [ -n "$THREAD_ID" ]; then
+            WEBHOOK_URL="${WEBHOOK_URL}?thread_id=${THREAD_ID}"
+          fi
+
+          jq -n \
+            --arg plan "$PLAN_PREVIEW" \
+            --arg issue_url "$ISSUE_URL" \
+            --arg issue_num "$ISSUE_NUM" \
+            '{content: ("**Plan ready!** (Issue #" + $issue_num + ")\n\n" + $plan + "\n\n**Full plan:** " + $issue_url + "\n**To revise:** `/dev-revise issue:" + $issue_num + " feedback:\"...\"`\n**To approve:** `/dev-approve issue:" + $issue_num + "`")}' | \
+            curl -H "Content-Type: application/json" -d @- "$WEBHOOK_URL" || true
+
+      # ============================================================
+      # REVISE PHASE
+      # ============================================================
+
+      - name: "[Revise] Fetch issue and generate revised plan"
+        if: inputs.phase == 'revise'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          FEEDBACK: ${{ inputs.feedback }}
+        run: |
+          # Fetch issue body and comments
+          gh issue view "$ISSUE_NUMBER" --json body,comments > /tmp/issue_data.json
+
+          ISSUE_BODY=$(jq -r '.body' /tmp/issue_data.json)
+          COMMENTS=$(jq -r '.comments[].body' /tmp/issue_data.json 2>/dev/null || echo "")
+
+          # Write context to temp file to avoid shell injection
+          cat <<CTXEOF > /tmp/revise_context.txt
+          CURRENT PLAN (from GitHub Issue #${ISSUE_NUMBER}):
+          ${ISSUE_BODY}
+
+          PREVIOUS COMMENTS:
+          ${COMMENTS}
+
+          NEW FEEDBACK:
+          ${FEEDBACK}
+          CTXEOF
+
+          claude -p "You are working on the discord-product-robot project.
+          Here is the current plan and feedback:
+
+          $(cat /tmp/revise_context.txt)
+
+          Revise the plan based on the new feedback. Output the COMPLETE revised plan in markdown.
+          Do NOT implement anything. Just output the revised plan." \
+            --dangerously-skip-permissions > /tmp/revised_plan.txt 2>&1 || true
+
+      - name: "[Revise] Update issue body"
+        if: inputs.phase == 'revise'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          DISCORD_USER: ${{ inputs.discord_user }}
+          THREAD_ID: ${{ inputs.thread_id }}
+          FEEDBACK: ${{ inputs.feedback }}
+        run: |
+          # Fetch original issue to preserve metadata
+          ORIGINAL_BODY=$(gh issue view "$ISSUE_NUMBER" --json body -q '.body')
+
+          # Extract the task type and task from original body
+          TASK_TYPE=$(echo "$ORIGINAL_BODY" | grep -oP '(?<=\*\*Type:\*\* ).*' | head -1 || echo "feature")
+          TASK=$(echo "$ORIGINAL_BODY" | grep -oP '(?<=\*\*Task:\*\* ).*' | head -1 || echo "")
+          ORIG_REQUESTER=$(echo "$ORIGINAL_BODY" | grep -oP '(?<=\*\*Requested by:\*\* ).*' | head -1 || echo "unknown")
+
+          REVISED_BODY=$(cat /tmp/revised_plan.txt)
+
+          cat <<REVEOF > /tmp/revised_issue_body.md
+          <!-- discord_thread_id: ${THREAD_ID} -->
+
+          **Type:** ${TASK_TYPE}
+          **Requested by:** ${ORIG_REQUESTER}
+          **Task:** ${TASK}
+          **Last revised by:** ${DISCORD_USER}
+
+          ---
+
+          ## Plan (Revised)
+
+          ${REVISED_BODY}
+
+          ---
+
+          *Use \`/dev-revise issue:${ISSUE_NUMBER} feedback:"..."\` to request more changes, or \`/dev-approve issue:${ISSUE_NUMBER}\` to implement.*
+          REVEOF
+
+          gh issue edit "$ISSUE_NUMBER" --body-file /tmp/revised_issue_body.md
+
+      - name: "[Revise] Post revised plan to Discord thread"
+        if: inputs.phase == 'revise'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          THREAD_ID: ${{ inputs.thread_id }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          REVISED_PREVIEW=$(head -c 1500 /tmp/revised_plan.txt)
+          if [ "$(wc -c < /tmp/revised_plan.txt)" -gt 1500 ]; then
+            REVISED_PREVIEW="${REVISED_PREVIEW}..."
+          fi
+
+          ISSUE_URL="https://github.com/${{ github.repository }}/issues/${ISSUE_NUMBER}"
+
+          WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
+          if [ -n "$THREAD_ID" ]; then
+            WEBHOOK_URL="${WEBHOOK_URL}?thread_id=${THREAD_ID}"
+          fi
+
+          jq -n \
+            --arg plan "$REVISED_PREVIEW" \
+            --arg issue_url "$ISSUE_URL" \
+            --arg issue_num "$ISSUE_NUMBER" \
+            '{content: ("**Plan revised!** (Issue #" + $issue_num + ")\n\n" + $plan + "\n\n**Full plan:** " + $issue_url + "\n**To revise again:** `/dev-revise issue:" + $issue_num + " feedback:\"...\"`\n**To approve:** `/dev-approve issue:" + $issue_num + "`")}' | \
+            curl -H "Content-Type: application/json" -d @- "$WEBHOOK_URL" || true
+
+      # ============================================================
+      # IMPLEMENT PHASE
+      # ============================================================
+
+      - name: "[Implement] Fetch plan and implement"
+        if: inputs.phase == 'implement'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          # Fetch issue
+          gh issue view "$ISSUE_NUMBER" --json title,body,comments > /tmp/impl_issue.json
+
+          ISSUE_TITLE=$(jq -r '.title' /tmp/impl_issue.json)
+          ISSUE_BODY=$(jq -r '.body' /tmp/impl_issue.json)
+          COMMENTS=$(jq -r '.comments[].body' /tmp/impl_issue.json 2>/dev/null || echo "")
+
+          cat <<IMPLEOF > /tmp/impl_context.txt
+          APPROVED PLAN (from GitHub Issue #${ISSUE_NUMBER}):
+          Title: ${ISSUE_TITLE}
+
+          ${ISSUE_BODY}
+
+          REVIEW COMMENTS:
+          ${COMMENTS}
+          IMPLEOF
+
+          claude -p "You are working on the discord-product-robot project.
+          The following plan has been reviewed and approved for implementation:
+
+          $(cat /tmp/impl_context.txt)
+
+          Implement this plan now. Follow existing code patterns (ESM imports, process.env for config).
+          Keep changes minimal and focused. Do NOT modify CI/CD workflow files." \
+            --dangerously-skip-permissions
+
+      - name: "[Implement] Generate branch name"
+        if: inputs.phase == 'implement'
+        id: impl_branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --json title -q '.title')
+          SLUG=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 40)
+          TIMESTAMP=$(date +%s)
+          BRANCH="claude/${SLUG}-${TIMESTAMP}"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: "[Implement] Check for changes"
+        if: inputs.phase == 'implement'
+        id: impl_changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
@@ -76,63 +346,102 @@ jobs:
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit and push
-        if: steps.changes.outputs.has_changes == 'true'
+      - name: "[Implement] Commit, push, and create PR"
+        if: inputs.phase == 'implement' && steps.impl_changes.outputs.has_changes == 'true'
+        id: impl_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          DISCORD_USER: ${{ inputs.discord_user }}
         run: |
+          ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --json title -q '.title')
+          BRANCH="${{ steps.impl_branch.outputs.name }}"
+
+          git checkout -b "$BRANCH"
           git config user.name "claude-dev-bot"
           git config user.email "claude-dev-bot@users.noreply.github.com"
           git add -A
-          git commit -m "${{ github.event.inputs.task_type }}: ${{ github.event.inputs.task }}
+          git commit -m "${ISSUE_TITLE}
 
-          Requested by ${{ github.event.inputs.discord_user }} via Discord /dev command.
+          Implements plan from issue #${ISSUE_NUMBER}.
+          Approved by ${DISCORD_USER} via Discord /dev-approve command.
 
           Co-Authored-By: Claude <noreply@anthropic.com>"
-          git push origin "${{ steps.branch.outputs.name }}"
+          git push origin "$BRANCH"
 
-      - name: Create Pull Request
-        if: steps.changes.outputs.has_changes == 'true'
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
           PR_URL=$(gh pr create \
-            --title "${{ github.event.inputs.task_type }}: ${{ github.event.inputs.task }}" \
+            --title "$ISSUE_TITLE" \
             --body "## Summary
-          Requested by **${{ github.event.inputs.discord_user }}** via Discord \`/dev\` command.
+          Implements the approved plan from issue #${ISSUE_NUMBER}.
 
-          **Type:** ${{ github.event.inputs.task_type }}
-          **Task:** ${{ github.event.inputs.task }}
+          **Approved by:** ${DISCORD_USER}
+
+          Closes #${ISSUE_NUMBER}
 
           ---
           *Implemented by Claude Code Dev Agent*" \
             --base main \
-            --head "${{ steps.branch.outputs.name }}")
+            --head "$BRANCH")
           echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
 
-      - name: Post success to Discord
-        if: steps.changes.outputs.has_changes == 'true' && success()
+      - name: "[Implement] Post PR to Discord thread"
+        if: inputs.phase == 'implement' && steps.impl_changes.outputs.has_changes == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          THREAD_ID: ${{ inputs.thread_id }}
+          PR_URL: ${{ steps.impl_pr.outputs.url }}
+          BRANCH: ${{ steps.impl_branch.outputs.name }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
-          curl -H "Content-Type: application/json" -d "{
-            \"content\": \"✅ **Dev Agent finished!**\nRequested by: **${{ github.event.inputs.discord_user }}**\nTask: ${{ github.event.inputs.task }}\nPR: ${{ steps.pr.outputs.url }}\"
-          }" "$DISCORD_WEBHOOK_URL"
+          WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
+          if [ -n "$THREAD_ID" ]; then
+            WEBHOOK_URL="${WEBHOOK_URL}?thread_id=${THREAD_ID}"
+          fi
 
-      - name: Post no-changes to Discord
-        if: steps.changes.outputs.has_changes == 'false'
+          jq -n \
+            --arg pr_url "$PR_URL" \
+            --arg branch "$BRANCH" \
+            --arg issue_num "$ISSUE_NUMBER" \
+            '{content: ("**Implementation complete!** (Issue #" + $issue_num + ")\n\nPR: " + $pr_url + "\nBranch: `" + $branch + "`\n\nTo test live: `git checkout " + $branch + " && railway up`\n\n*Review the PR and merge when ready. Nothing auto-merges.*")}' | \
+            curl -H "Content-Type: application/json" -d @- "$WEBHOOK_URL" || true
+
+      - name: "[Implement] Post no-changes to Discord thread"
+        if: inputs.phase == 'implement' && steps.impl_changes.outputs.has_changes == 'false'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          THREAD_ID: ${{ inputs.thread_id }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
-          curl -H "Content-Type: application/json" -d "{
-            \"content\": \"⚠️ **Dev Agent finished — no changes made.**\nRequested by: **${{ github.event.inputs.discord_user }}**\nTask: ${{ github.event.inputs.task }}\nClaude reviewed the codebase but didn't produce any file changes.\"
-          }" "$DISCORD_WEBHOOK_URL"
+          WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
+          if [ -n "$THREAD_ID" ]; then
+            WEBHOOK_URL="${WEBHOOK_URL}?thread_id=${THREAD_ID}"
+          fi
+
+          jq -n \
+            --arg issue_num "$ISSUE_NUMBER" \
+            '{content: ("**No changes made** for issue #" + $issue_num + ".\nClaude reviewed the plan and codebase but did not produce any file changes.")}' | \
+            curl -H "Content-Type: application/json" -d @- "$WEBHOOK_URL" || true
+
+      # ============================================================
+      # FAILURE HANDLER (all phases)
+      # ============================================================
 
       - name: Post failure to Discord
         if: failure()
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          THREAD_ID: ${{ inputs.thread_id }}
+          PHASE: ${{ inputs.phase }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -H "Content-Type: application/json" -d "{
-            \"content\": \"❌ **Dev Agent failed.**\nRequested by: **${{ github.event.inputs.discord_user }}**\nTask: ${{ github.event.inputs.task }}\nLogs: ${RUN_URL}\"
-          }" "$DISCORD_WEBHOOK_URL"
+
+          WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
+          if [ -n "$THREAD_ID" ]; then
+            WEBHOOK_URL="${WEBHOOK_URL}?thread_id=${THREAD_ID}"
+          fi
+
+          jq -n \
+            --arg phase "$PHASE" \
+            --arg run_url "$RUN_URL" \
+            '{content: ("**Dev agent failed** during " + $phase + " phase.\nLogs: " + $run_url)}' | \
+            curl -H "Content-Type: application/json" -d @- "$WEBHOOK_URL" || true
